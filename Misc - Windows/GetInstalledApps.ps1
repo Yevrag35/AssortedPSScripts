@@ -3,76 +3,89 @@
 param
 (
     [parameter(Mandatory=$false,Position=0)]
-    [string] $ComputerName = "localhost",
-    
+    [string[]] $ComputerName = $env:COMPUTERNAME,
+
     [parameter(Mandatory=$false,Position=1)]
-    [SupportsWildcards()]
+#    [SupportsWildcards()]
     [string[]] $SearchFor
 )
 
-$UninstallKeys = @( 
-    "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall", 
+$UninstallKeys = @(
+    "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
     "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall"
 )
 
-$list = New-Object 'System.Collections.Generic.List[psobject]';
+$list = New-Object 'System.Collections.Generic.List[object]';
 
-foreach($UninstallKey in $UninstallKeys) {
+foreach ($computer in $ComputerName)
+{
 
-    #Create an instance of the Registry Object and open the HKLM base key
-    if ($ComputerName -eq "$env:COMPUTERNAME" -or $ComputerName -eq "localhost" -or $ComputerName -eq ".")
+    if ($computer -eq "localhost" -or $computer -eq ".")
     {
-        $Reg = [Microsoft.Win32.RegistryKey]::OpenBaseKey('LocalMachine', [Microsoft.Win32.RegistryView]::Default);
+        $computer = $env:COMPUTERNAME
     }
-    else
+
+    try
     {
-        $Reg = [Microsoft.Win32.RegistryKey]::OpenRemoteBaseKey("LocalMachine", $ComputerName);
-        if ($null -eq $Reg)
+        $Reg = [Microsoft.Win32.RegistryKey]::OpenRemoteBaseKey("LocalMachine", $computer);
+    }
+    catch [System.IO.IOException]
+    {
+        Write-Error "$($computer): Could not open the registry remotely!  Is the `"RemoteRegistry`" running`?"
+    }
+    if ($null -eq $Reg)
+    {
+        Write-Error "$($computer): Could not open the registry remotely!  Is the `"RemoteRegistry`" running`?"
+    }
+
+    foreach($UninstallKey in $UninstallKeys)
+    {
+        #Drill down into the Uninstall key using the OpenSubKey Method
+        $Regkey = $Reg.OpenSubKey($UninstallKey)
+
+        #Retrieve an array of string that contain all the subkey names
+        $Subkeys = $Regkey.GetSubKeyNames()
+
+        foreach($key in $subkeys)
         {
-            throw "Could not open the remote machine's registry!  Is the `"RemoteRegistry`" running`?"
+
+            $thisKey = $UninstallKey+"\\"+$key
+            $thisSubKey= $reg.OpenSubKey($thisKey)
+            $displayName = $thisSubKey.GetValue("DisplayName")
+            $publisher = $thisSubKey.GetValue("Publisher")
+
+            if (-not [string]::IsNullOrEmpty($displayName) -or -not [string]::IsNullOrEmpty($publisher))
+            {
+                $pso = New-Object -TypeName 'psobject' -Property @{
+                    ComputerName = $computer
+                    DisplayName = $displayName
+                    DisplayVersion = $thisSubKey.GetValue("DisplayVersion")
+                    InstallLocation = $thisSubKey.GetValue("InstallLocation")
+                    Publisher = $publisher
+                    UninstallString = $thisSubKey.GetValue("UninstallString")
+                }
+                $list.Add($pso)
+            }
         }
     }
-
-    #Drill down into the Uninstall key using the OpenSubKey Method
-    $Regkey = $Reg.OpenSubKey($UninstallKey)
-
-    #Retrieve an array of string that contain all the subkey names
-    $Subkeys = $Regkey.GetSubKeyNames() 
-
-    foreach($key in $subkeys) 
-    {
-
-        $thisKey=$UninstallKey+"\\"+$key
-        $thisSubKey=$reg.OpenSubKey($thisKey) 
-
-        $list.Add((New-Object PSObject -Property @{
-
-            ComputerName = $Computername
-            DisplayName = $thisSubKey.GetValue("DisplayName")
-            DisplayVersion = $thisSubKey.GetValue("DisplayVersion")
-            InstallLocation = $thisSubKey.GetValue("InstallLocation")
-            Publisher = $thisSubKey.GetValue("Publisher")
-            UninstallString = $thisSubKey.GetValue("UninstallString")
-        }));
-    }
 }
+
 if ($PSBoundParameters.ContainsKey("SearchFor"))
 {
-    foreach ($appToSearch in @($SearchFor))
+    $patterns = New-Object -TypeName 'System.Collections.Generic.List[System.Management.Automation.WildcardPattern]' -ArgumentList $SearchFor.Count
+    foreach ($appToSearch in $SearchFor)
     {
-        $wildcardSearch = [System.Management.Automation.WildcardPattern]::Get(
-            $appToSearch, [System.Management.Automation.WildcardOptions]::IgnoreCase
-        );
-        foreach ($app in $($list.ToArray() | ?{![string]::IsNullOrEmpty($_.DisplayName)}))
+        $patterns.Add((New-Object -TypeName "System.Management.Automation.WildcardPattern" -ArgumentList $appToSearch, "IgnoreCase"))
+    }
+    foreach ($app in $list)
+    {
+        if (@($patterns | ForEach-Object { $_.IsMatch($app.DisplayName)}) -contains $true)
         {
-            if ($wildcardSearch.IsMatch($app.DisplayName))
-            {
-                Write-Output $app;
-            }
+            $app
         }
     }
 }
 else
 {
-    Write-Output $list.ToArray();
+    $list
 }
